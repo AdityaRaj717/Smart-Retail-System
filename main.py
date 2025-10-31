@@ -53,7 +53,6 @@ IMG_SIZE = 150
 DISTANCE_THRESHOLD = 0.8 # Similarity threshold for adding an item
 
 # Load the product database information (names, prices)
-# Old db
 product_db = {
     0: {"name": "Butter cookies", "price": 35},
     1: {"name": "Chana Chur", "price": 110},
@@ -79,7 +78,6 @@ try:
     with open(path_to_model + 'index_to_product_id.json', 'r') as f:
         index_to_product_id = json.load(f)
         index_to_product_id = {int(k): v for k, v in index_to_product_id.items()}
-
 except FileNotFoundError:
     print("Error: Faiss index or product mapping not found. Please run 'create_database.py' first.")
     exit()
@@ -118,12 +116,10 @@ while True:
         # --- Get Embedding and Search ---
         with torch.no_grad():
             embedding = model(input_tensor).cpu().numpy()
-            # Search the faiss index for the nearest neighbor
-            D, I = faiss_index.search(embedding, 1) # D=distance, I=index
+            D, I = faiss_index.search(embedding, 1)
             distance = D[0][0]
             nearest_index = I[0][0]
 
-        # If the match is close enough, add the item to the bill
         if distance < DISTANCE_THRESHOLD:
             product_id = index_to_product_id[nearest_index]
             product_info = product_db.get(product_id)
@@ -139,7 +135,29 @@ while True:
                     last_detection_time = time.time()
 
     # --- UI Drawing ---
+    # Draw the ROI box
     cv2.rectangle(frame, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), (0, 255, 0), 2)
+    cv2.putText(frame, "Place Item Here", (roi_x, roi_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+    # --- Display the Bill (ADDED THIS SECTION BACK) ---
+    bill_y = 40
+    cv2.putText(frame, "--- BILL ---", (10, bill_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    bill_y += 30
+    for item in current_bill:
+        item_text = f"{item['name']}: Rs. {item['price']:.2f}"
+        cv2.putText(frame, item_text, (10, bill_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        bill_y += 20
+
+    # Draw a line and the total
+    cv2.line(frame, (10, bill_y), (160, bill_y), (255, 255, 255), 1)
+    bill_y += 25
+    total_text = f"TOTAL: Rs. {total_price:.2f}"
+    cv2.putText(frame, total_text, (10, bill_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+    # Display instructions
+    cv2.putText(frame, "c: Clear Bill | q: Quit", (10, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+    # Show the final frame
     cv2.imshow('Smart Retail System', frame)
 
     key = cv2.waitKey(1) & 0xFF
