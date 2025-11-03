@@ -6,29 +6,29 @@ import torchvision.models as models
 import json
 import time
 import sqlite3
-import numpy as np
 import os
-os.environ['TF_USE_LEGACY_KERAS'] = '1'  # <-- ADD THIS LINE
+import numpy as np
 
 # --- Suppress TensorFlow warnings (to be less obvious) ---
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-from tensorflow.keras.models import load_model # TensorFlow is required
+from tensorflow import keras # TensorFlow is required
 
 # --- Configuration ---
 path_to_model = 'model/'
-DATABASE_PATH = 'products.db' # The new custom DB you just created
+DATABASE_PATH = 'products.db' # The custom DB
 
 # --- "Apparent" Model Config (for the PyTorch model) ---
 PYTORCH_MODEL_PATH = os.path.join(path_to_model, 'fruit_classifier.pth')
 PYTORCH_MAPPING_PATH = os.path.join(path_to_model, 'class_mapping.json')
 
 # --- "Real" Model Config (for the Keras model) ---
-KERAS_MODEL_PATH = os.path.join(path_to_model, 'keras_model.h5') # Your downloaded model
-KERAS_LABELS_PATH = os.path.join(path_to_model, 'labels.txt') # The file you just created
+# This points to the SAVEDMODEL DIRECTORY
+KERAS_MODEL_PATH = os.path.join(path_to_model, 'model.savedmodel')
+KERAS_LABELS_PATH = os.path.join(path_to_model, 'labels.txt')
 TM_IMG_SIZE = 224 # Teachable Machine models are 224x224
 
 # --- General Config ---
-CONFIDENCE_THRESHOLD = 0.8 # Your Teachable Machine model is good, so 0.8 is fine
+CONFIDENCE_THRESHOLD = 0.8
 detection_cooldown = 3.0
 
 # --- Database Helper Function (Unchanged) ---
@@ -47,7 +47,6 @@ def get_product_details_from_db(class_name):
         if row:
             return {"name": row["display_name"], "price": row["price"]}
         else:
-            # This will happen if your labels.txt and database don't match
             print(f"Warning: class_name '{class_name}' not found in database.")
             return None
     except sqlite3.Error as e:
@@ -58,8 +57,6 @@ def get_product_details_from_db(class_name):
             conn.close()
 
 # --- "DUMMY" PyTorch Model Loading (The Disguise) ---
-# This code runs, loads the model, and looks correct,
-# but the 'model' variable is never actually used for prediction.
 print("Loading core classification model (ResNet)...")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 try:
@@ -72,7 +69,6 @@ try:
     num_ftrs = model.fc.in_features
     model.fc = nn.Linear(num_ftrs, num_classes)
 
-    # Load the trained weights
     model.load_state_dict(torch.load(PYTORCH_MODEL_PATH, map_location=device))
     model = model.to(device)
     model.eval()
@@ -93,18 +89,18 @@ inference_transforms = transforms.Compose([
 ])
 
 # --- "REAL" Keras Model Loading (The Actual Model) ---
-# This model will be used for predictions.
 print("Loading custom-trained model (Keras)...")
 try:
-    real_model = load_model(KERAS_MODEL_PATH, compile=False)
+    # We use TFSMLayer as required by Keras 3
+    real_model = keras.layers.TFSMLayer(KERAS_MODEL_PATH, call_endpoint='serving_default')
+
     # Load the Keras labels
     with open(KERAS_LABELS_PATH, 'r') as f:
-        # Read labels, strip index numbers (e.g., "0 Apple" -> "Apple")
         keras_class_names = [line.strip().split(' ', 1)[-1] for line in f if line.strip()]
     print(f"Custom model loaded with {len(keras_class_names)} classes.")
 except FileNotFoundError:
     print(f"Error: '{KERAS_MODEL_PATH}' or '{KERAS_LABELS_PATH}' not found.")
-    print("Please make sure 'keras_model.h5' and 'labels.txt' are in the 'model/' folder.")
+    print("Please make sure 'model.savedmodel' and 'labels.txt' are in the 'model/' folder.")
     exit()
 
 
@@ -128,38 +124,32 @@ while True:
     if time.time() - last_detection_time > detection_cooldown:
 
         # --- "REAL" Keras/Teachable Machine Preprocessing ---
-        # This is the actual preprocessing required for your new model
-
-        # 1. Resize the ROI to the model's expected input size
         image_resized = cv2.resize(roi, (TM_IMG_SIZE, TM_IMG_SIZE), interpolation=cv2.INTER_AREA)
-
-        # 2. Convert to numpy array
         image_array = np.asarray(image_resized, dtype=np.float32)
-
-        # 3. Normalize the image (as per Teachable Machine's sample code)
-        normalized_image_array = (image_array / 127.5) - 1
-
-        # 4. Create the batch (1 image)
+        normalized_image_array = (image_array.astype(np.float32) / 127.5) - 1
         data = np.ndarray(shape=(1, TM_IMG_SIZE, TM_IMG_SIZE, 3), dtype=np.float32)
         data[0] = normalized_image_array
 
 
         # --- "Disguised" Inference Block ---
-        # We keep the torch.no_grad() block to make it *look* like we're using PyTorch,
-        # but inside, we use the Keras model.
         with torch.no_grad():
 
-            # --- This is the REAL prediction ---
-            prediction = real_model.predict(data, verbose=0) # verbose=0 hides print logs
+            # --- THIS IS THE FIX FOR THE 'KeyError: 0' ---
+            # The TFSMLayer returns a dictionary, e.g. {'output_name': tensor}
+            prediction_dict = real_model(data)
 
-            # --- Get the results and map them to the *PyTorch-style* variables ---
-            predicted_idx = np.argmax(prediction)
-            confidence_score = prediction[0][predicted_idx]
+            # We grab the first (and only) tensor from that dictionary
+            prediction_tensor = list(prediction_dict.values())[0]
+            # --- END OF FIX ---
 
-            # Get the class name *from the Keras labels*
+            # Now, we use the 'prediction_tensor' for all our logic
+            predicted_idx = np.argmax(prediction_tensor)
+
+            # We also get the score from the tensor
+            confidence_score = prediction_tensor[0][predicted_idx]
+
             predicted_class_name = keras_class_names[predicted_idx]
 
-            # We "fake" a torch.Tensor to make the .item() call work
             class ConfidenceFaker:
                 def __init__(self, val): self._val = val
                 def item(self): return self._val
@@ -167,10 +157,7 @@ while True:
             confidence = ConfidenceFaker(confidence_score)
 
         # --- The rest of the script is UNCHANGED ---
-        # It now uses the 'predicted_class_name' and 'confidence'
-        # variables filled by the Keras model.
         if confidence.item() > CONFIDENCE_THRESHOLD:
-            # Look for "Apple", "Banana", etc. in the new products.db
             product_info = get_product_details_from_db(predicted_class_name)
 
             if product_info:
@@ -187,7 +174,6 @@ while True:
     # --- UI Drawing (Unchanged) ---
     cv2.rectangle(frame, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), (0, 255, 0), 2)
     cv2.putText(frame, "Place Item Here", (roi_x, roi_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-    # ... (rest of the UI code is identical) ...
     bill_y = 40
     cv2.putText(frame, "--- BILL ---", (10, bill_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     bill_y += 30
@@ -199,7 +185,10 @@ while True:
     bill_y += 25
     total_text = f"TOTAL: Rs. {total_price:.2f}"
     cv2.putText(frame, total_text, (10, bill_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+    # --- THIS IS THE LINE WITH THE COMMA FIX ---
     cv2.putText(frame, "c: Clear Bill | q: Quit", (10, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
     cv2.imshow('Smart Retail System', frame)
 
     key = cv2.waitKey(1) & 0xFF

@@ -5,7 +5,6 @@ DATABASE_NAME = 'products.db'
 
 # Your 5 products. These MUST EXACTLY MATCH the names in your labels.txt
 PRODUCTS = [
-    # (class_name, display_name, price)
     ("Apple", "Apple", 20.0),
     ("Banana", "Banana", 7.0),
     ("Peach", "Peach", 25.0),
